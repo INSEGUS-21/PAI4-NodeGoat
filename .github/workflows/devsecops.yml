@@ -1,0 +1,62 @@
+dast-zap:
+    name: 3. Staging y DAST (OWASP ZAP)
+    needs: [sast-semgrep, sca-dependency-check]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout del código
+        uses: actions/checkout@v4
+
+      # Paso 1: Levantar MongoDB y NodeGoat en red Docker
+      - name: Desplegar NodeGoat y MongoDB en Staging
+        run: |
+          docker network create nodegoat-net
+          docker run -d --name mongo --network nodegoat-net mongo:4.4
+          docker build -t nodegoat-app:staging .
+          docker run -d --name nodegoat --network nodegoat-net -p 4000:4000 \
+            -e MONGODB_URI="mongodb://mongo:27017/nodegoat" nodegoat-app:staging
+
+          # Esperar hasta 60s a que NodeGoat esté listo
+          for i in {1..30}; do
+            if curl -s http://localhost:4000 > /dev/null; then
+              echo "NodeGoat activo en http://localhost:4000"
+              break
+            fi
+            sleep 2
+          done
+
+      # Dar permisos de escritura para que el contenedor de ZAP pueda crear zap-report.xml
+      - name: Preparar permisos para informe ZAP
+        run: chmod 777 ${{ github.workspace }}
+
+      # Paso 2: Ejecutar OWASP ZAP contra NodeGoat en localhost:4000
+      - name: Ejecutar OWASP ZAP (DAST)
+        uses: zaproxy/action-full-scan@v0.10.0
+        with:
+          target: 'http://localhost:4000'
+          cmd_options: '-x zap-report.xml'
+          allow_issue_writing: false
+          fail_action: false
+
+      # Paso 3: Subir el informe XML como artefacto para el job de DefectDojo
+      - name: Guardar artefacto zap-report.xml
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dast-report
+          path: zap-report.xml
+
+      # Paso 4: Quality Gate B (Bloqueante ante >= 1 hallazgo crítico o alto)
+      - name: Quality Gate B (Bloqueante)
+        run: |
+          if [ ! -f zap-report.xml ]; then
+            echo "::error::No se generó el informe zap-report.xml"
+            exit 1
+          fi
+
+          HIGH_ALERTS=$(grep -c "<riskcode>3</riskcode>" zap-report.xml || true)
+          echo "Vulnerabilidades críticas/altas detectadas por ZAP: $HIGH_ALERTS"
+
+          if [ "$HIGH_ALERTS" -ge 1 ]; then
+            echo "::error::QUALITY GATE B BLOQUEADO: Se detectaron $HIGH_ALERTS vulnerabilidades altas/críticas."
+            exit 1
+          fi
