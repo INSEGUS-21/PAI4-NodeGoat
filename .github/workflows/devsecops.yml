@@ -1,8 +1,10 @@
-dast-zap:
+  # =========================================================================
+  # STAGE 3: STAGING Y DAST (Solo escanea y sube el informe)
+  # =========================================================================
+  dast-zap:
     name: 3. Staging y DAST (OWASP ZAP)
     needs: [sast-semgrep, sca-dependency-check]
     runs-on: ubuntu-latest
-    # GitHub levanta MongoDB automáticamente como servicio
     services:
       mongo:
         image: mongo:4.4
@@ -33,12 +35,9 @@ dast-zap:
           name: dast-report
           path: zap-report.xml
 
-      - name: Quality Gate B (Bloqueante >= 1 crítica/alta)
-        run: |
-          HIGH=$(grep -c "<riskcode>3</riskcode>" zap-report.xml || true)
-          echo "Vulnerabilidades altas/críticas: $HIGH"
-          [ "$HIGH" -ge 1 ] && exit 1
-
+  # =========================================================================
+  # STAGE 4: IMPORTAR LOS 3 INFORMES A DEFECTDOJO
+  # =========================================================================
   import-defectdojo:
     name: 4. Importar resultados a DefectDojo
     needs: [sast-semgrep, sca-dependency-check, dast-zap]
@@ -49,7 +48,7 @@ dast-zap:
         with:
           path: all-reports
 
-      - name: Subir informes a DefectDojo vía API
+      - name: Subir informes a DefectDojo vía API (reimport-scan)
         env:
           DOJO_URL: ${{ secrets.DOJO_URL }}
           DOJO_TOKEN: ${{ secrets.DOJO_TOKEN }}
@@ -71,3 +70,45 @@ dast-zap:
                 -F "file=@$FILE"
             fi
           done
+
+  # =========================================================================
+  # QUALITY GATE B: CONSULTA GLOBAL EN DEFECTDOJO (Bloqueante)
+  # =========================================================================
+  quality-gate-b:
+    name: 5. Quality Gate B (DefectDojo)
+    needs: [import-defectdojo]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Evaluar hallazgos Críticos/Altos activos en DefectDojo
+        env:
+          DOJO_URL: ${{ secrets.DOJO_URL }}
+          DOJO_TOKEN: ${{ secrets.DOJO_TOKEN }}
+          ENGAGEMENT_ID: ${{ secrets.DOJO_ENGAGEMENT_ID }}
+        run: |
+          # Espera breve para asegurar que DefectDojo termina de procesar y deduplicar
+          sleep 5
+
+          # Consulta a la API cuántos findings ACTIVOS y NO FALSOS POSITIVOS son Critical o High
+          RESPONSE=$(curl -f -s -H "Authorization: Token $DOJO_TOKEN" \
+            "$DOJO_URL/api/v2/findings/?test__engagement=$ENGAGEMENT_ID&active=true&false_p=false&severity__in=Critical,High&limit=1")
+
+          COUNT=$(echo "$RESPONSE" | jq '.count')
+          echo "Total de vulnerabilidades Críticas/Altas activas en DefectDojo (SAST + SCA + DAST): $COUNT"
+
+          if [ "$COUNT" -ge 1 ]; then
+            echo "::error::QUALITY GATE B BLOQUEADO: DefectDojo reporta $COUNT vulnerabilidades críticas o altas activas."
+            exit 1
+          fi
+
+  # =========================================================================
+  # STAGE 6: PRODUCCIÓN (Solo si DefectDojo aprueba el Gate B)
+  # =========================================================================
+  deploy-production:
+    name: 6. Despliegue a Producción
+    needs: [quality-gate-b]
+    if: success() && github.ref == 'refs/heads/main'
+    environment: production
+    runs-on: ubuntu-latest
+    steps:
+      - name: Desplegar versión aprobada en Producción
+        run: echo "Quality Gate B superado en DefectDojo. Desplegando en producción..."
