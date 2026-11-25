@@ -229,4 +229,3 @@ jobs:
       - name: Desplegar versión aprobada en Producción
         run: echo "Quality Gate B superado en DefectDojo. Desplegando en producción..."
 
-        
