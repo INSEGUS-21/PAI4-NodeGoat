@@ -104,10 +104,10 @@ jobs:
           HIGH_SAST=$(jq '[.results[] | select(.extra.severity == "ERROR")] | length' static-reports/sast-report/semgrep.json || echo 0)
           HIGH_SCA=$(grep -c "<severity>HIGH</severity>\|<severity>CRITICAL</severity>" static-reports/dependency-check-report/dependency-check-report.xml || true)
 
-          echo "Hallazgos críticos/altos -> SAST: $HIGH_SAST \vert{} SCA:$HIGH_SCA"
+          echo "Hallazgos críticos/altos -> SAST: $HIGH_SAST | SCA: $HIGH_SCA"
 
-          if [ "$HIGH_SAST" -ge 1 ] \vert{}\vert{} [ "$HIGH_SCA" -ge 1 ]; then
-            echo "::warning::QUALITY GATE A (AVISO): Se detectaron vulnerabilidades críticas/altas (SAST: $HIGH_SAST, SCA:$HIGH_SCA). El pipeline continúa hacia DAST."
+          if [ "$HIGH_SAST" -ge 1 ] || [ "$HIGH_SCA" -ge 1 ]; then
+            echo "::warning::QUALITY GATE A (AVISO): Se detectaron vulnerabilidades críticas/altas (SAST: $HIGH_SAST, SCA: $HIGH_SCA). El pipeline continúa hacia DAST."
             exit 1
           fi
 
@@ -181,4 +181,50 @@ jobs:
                 -H "Authorization: Token $DOJO_TOKEN" \
                 -F "scan_type=$TYPE" \
                 -F "engagement=$ENGAGEMENT_ID" \
-                -F "scan_date
+                -F "scan_date=$(date +%Y-%m-%d)" \
+                -F "active=true" \
+                -F "verified=false" \
+                -F "file=@$FILE"
+            else
+              echo "::warning::No se encontró el fichero $FILE"
+            fi
+          done
+
+  # =========================================================================
+  # QUALITY GATE B: CONSULTA GLOBAL EN DEFECTDOJO (Bloqueante)
+  # =========================================================================
+  quality-gate-b:
+    name: 5. Quality Gate B (DefectDojo)
+    needs: [import-defectdojo]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Evaluar hallazgos Críticos/Altos activos en DefectDojo
+        env:
+          DOJO_URL: ${{ secrets.DOJO_URL }}
+          DOJO_TOKEN: ${{ secrets.DOJO_TOKEN }}
+          ENGAGEMENT_ID: ${{ secrets.DOJO_ENGAGEMENT_ID }}
+        run: |
+          sleep 5
+          RESPONSE=$(curl -f -s -H "Authorization: Token $DOJO_TOKEN" \
+            "$DOJO_URL/api/v2/findings/?test__engagement=$ENGAGEMENT_ID&active=true&false_p=false&severity__in=Critical,High&limit=1")
+
+          COUNT=$(echo "$RESPONSE" | jq '.count')
+          echo "Total de vulnerabilidades Críticas/Altas activas en DefectDojo (SAST + SCA + DAST): $COUNT"
+
+          if [ "$COUNT" -ge 1 ]; then
+            echo "::error::QUALITY GATE B BLOQUEADO: DefectDojo reporta $COUNT vulnerabilidades críticas o altas activas."
+            exit 1
+          fi
+
+  # =========================================================================
+  # STAGE 6: PRODUCCIÓN (Solo si DefectDojo aprueba el Gate B)
+  # =========================================================================
+  deploy-production:
+    name: 6. Despliegue a Producción
+    needs: [quality-gate-b]
+    if: success() && github.ref == 'refs/heads/main'
+    environment: production
+    runs-on: ubuntu-latest
+    steps:
+      - name: Desplegar versión aprobada en Producción
+        run: echo "Quality Gate B superado en DefectDojo. Desplegando en producción..."
