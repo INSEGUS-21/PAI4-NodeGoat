@@ -60,3 +60,34 @@ dast-zap:
             echo "::error::QUALITY GATE B BLOQUEADO: Se detectaron $HIGH_ALERTS vulnerabilidades altas/críticas."
             exit 1
           fi
+import-defectdojo:
+    name: 4. Importar resultados a DefectDojo
+    needs: [sast-semgrep, sca-dependency-check, dast-zap]
+    if: always()   # <--- Clave: se ejecuta aunque dast-zap haya fallado por el Gate B
+    runs-on: ubuntu-latest
+    steps:
+      - name: Descargar informes de todos los análisis
+        uses: actions/download-artifact@v4
+        with:
+          path: all-reports
+
+      - name: Enviar informe DAST (ZAP) a DefectDojo
+        env:
+          DOJO_URL: ${{ secrets.DOJO_URL }}
+          DOJO_TOKEN: ${{ secrets.DOJO_TOKEN }}
+          ENGAGEMENT_ID: ${{ secrets.DOJO_ENGAGEMENT_ID }}
+        run: |
+          TODAY=$(date +%Y-%m-%d)
+          if [ -f all-reports/dast-report/zap-report.xml ]; then
+            curl -f -s -X POST "$DOJO_URL/api/v2/reimport-scan/" \
+              -H "Authorization: Token $DOJO_TOKEN" \
+              -F "scan_type=ZAP Scan" \
+              -F "engagement=$ENGAGEMENT_ID" \
+              -F "scan_date=$TODAY" \
+              -F "active=true" \
+              -F "verified=false" \
+              -F "file=@all-reports/dast-report/zap-report.xml"
+          else
+            echo "::error::No se encontró zap-report.xml en los artefactos"
+            exit 1
+          fi
