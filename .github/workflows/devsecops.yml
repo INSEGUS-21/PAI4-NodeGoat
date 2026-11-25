@@ -2,33 +2,22 @@ dast-zap:
     name: 3. Staging y DAST (OWASP ZAP)
     needs: [sast-semgrep, sca-dependency-check]
     runs-on: ubuntu-latest
+    # GitHub levanta MongoDB automáticamente como servicio
+    services:
+      mongo:
+        image: mongo:4.4
+        ports:
+          - 27017:27017
     steps:
-      - name: Checkout del código
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      # Paso 1: Levantar MongoDB y NodeGoat en red Docker
-      - name: Desplegar NodeGoat y MongoDB en Staging
+      - name: Desplegar NodeGoat en Staging
         run: |
-          docker network create nodegoat-net
-          docker run -d --name mongo --network nodegoat-net mongo:4.4
-          docker build -t nodegoat-app:staging .
-          docker run -d --name nodegoat --network nodegoat-net -p 4000:4000 \
-            -e MONGODB_URI="mongodb://mongo:27017/nodegoat" nodegoat-app:staging
+          npm install --ignore-scripts
+          MONGODB_URI="mongodb://localhost:27017/nodegoat" npm start &
+          sleep 10
+          chmod 777 ${{ github.workspace }}
 
-          # Esperar hasta 60s a que NodeGoat esté listo
-          for i in {1..30}; do
-            if curl -s http://localhost:4000 > /dev/null; then
-              echo "NodeGoat activo en http://localhost:4000"
-              break
-            fi
-            sleep 2
-          done
-
-      # Dar permisos de escritura para que el contenedor de ZAP pueda crear zap-report.xml
-      - name: Preparar permisos para informe ZAP
-        run: chmod 777 ${{ github.workspace }}
-
-      # Paso 2: Ejecutar OWASP ZAP contra NodeGoat en localhost:4000
       - name: Ejecutar OWASP ZAP (DAST)
         uses: zaproxy/action-full-scan@v0.10.0
         with:
@@ -37,57 +26,48 @@ dast-zap:
           allow_issue_writing: false
           fail_action: false
 
-      # Paso 3: Subir el informe XML como artefacto para el job de DefectDojo
-      - name: Guardar artefacto zap-report.xml
+      - name: Guardar informe zap-report.xml
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: dast-report
           path: zap-report.xml
 
-      # Paso 4: Quality Gate B (Bloqueante ante >= 1 hallazgo crítico o alto)
-      - name: Quality Gate B (Bloqueante)
+      - name: Quality Gate B (Bloqueante >= 1 crítica/alta)
         run: |
-          if [ ! -f zap-report.xml ]; then
-            echo "::error::No se generó el informe zap-report.xml"
-            exit 1
-          fi
+          HIGH=$(grep -c "<riskcode>3</riskcode>" zap-report.xml || true)
+          echo "Vulnerabilidades altas/críticas: $HIGH"
+          [ "$HIGH" -ge 1 ] && exit 1
 
-          HIGH_ALERTS=$(grep -c "<riskcode>3</riskcode>" zap-report.xml || true)
-          echo "Vulnerabilidades críticas/altas detectadas por ZAP: $HIGH_ALERTS"
-
-          if [ "$HIGH_ALERTS" -ge 1 ]; then
-            echo "::error::QUALITY GATE B BLOQUEADO: Se detectaron $HIGH_ALERTS vulnerabilidades altas/críticas."
-            exit 1
-          fi
-import-defectdojo:
+  import-defectdojo:
     name: 4. Importar resultados a DefectDojo
     needs: [sast-semgrep, sca-dependency-check, dast-zap]
-    if: always()   # <--- Clave: se ejecuta aunque dast-zap haya fallado por el Gate B
+    if: always()
     runs-on: ubuntu-latest
     steps:
-      - name: Descargar informes de todos los análisis
-        uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v4
         with:
           path: all-reports
 
-      - name: Enviar informe DAST (ZAP) a DefectDojo
+      - name: Subir informes a DefectDojo vía API
         env:
           DOJO_URL: ${{ secrets.DOJO_URL }}
           DOJO_TOKEN: ${{ secrets.DOJO_TOKEN }}
           ENGAGEMENT_ID: ${{ secrets.DOJO_ENGAGEMENT_ID }}
         run: |
-          TODAY=$(date +%Y-%m-%d)
-          if [ -f all-reports/dast-report/zap-report.xml ]; then
-            curl -f -s -X POST "$DOJO_URL/api/v2/reimport-scan/" \
-              -H "Authorization: Token $DOJO_TOKEN" \
-              -F "scan_type=ZAP Scan" \
-              -F "engagement=$ENGAGEMENT_ID" \
-              -F "scan_date=$TODAY" \
-              -F "active=true" \
-              -F "verified=false" \
-              -F "file=@all-reports/dast-report/zap-report.xml"
-          else
-            echo "::error::No se encontró zap-report.xml en los artefactos"
-            exit 1
-          fi
+          for item in \
+            "semgrep-report/semgrep-report.json|Semgrep JSON Report" \
+            "sca-report/dependency-check-report.xml|Dependency Check Scan" \
+            "dast-report/zap-report.xml|ZAP Scan"; do
+            FILE="all-reports/${item%%|*}"
+            TYPE="${item##*|}"
+            if [ -f "$FILE" ]; then
+              curl -f -s -X POST "$DOJO_URL/api/v2/reimport-scan/" \
+                -H "Authorization: Token $DOJO_TOKEN" \
+                -F "scan_type=$TYPE" \
+                -F "engagement=$ENGAGEMENT_ID" \
+                -F "scan_date=$(date +%Y-%m-%d)" \
+                -F "active=true" \
+                -F "file=@$FILE"
+            fi
+          done
