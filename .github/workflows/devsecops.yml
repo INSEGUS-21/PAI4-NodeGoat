@@ -1,7 +1,47 @@
-  # =========================================================================
-  # STAGE 3: STAGING Y DAST (Solo escanea y sube el informe)
-  # =========================================================================
-  dast-zap:
+sca-dependency-check:
+  name: 2. Análisis (SCA)
+  runs-on: ubuntu-latest
+
+  steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Dependency-Check
+        uses: dependency-check/Dependency-Check_Action@main
+        with:
+          project: ${{ github.event.repository.name }}
+          path: '.'
+          format: 'ALL'          
+          out: 'reports'
+          args: >
+            --nvdApiKey ${{ secrets.NVD_API_KEY }}
+
+      - name: Subir informe a DefectDojo
+        if: always()
+        run: |
+          curl --fail-with-body -X POST "${{ secrets.DOJO_URL }}/api/v2/import-scan/" \
+            -H "Authorization: Token ${{ secrets.DOJO_TOKEN }}" \
+            -F "scan_type=Dependency Check Scan" \
+            -F "file=@reports/dependency-check-report.xml" \
+            -F "product_name=${{ github.event.repository.name }}" \
+            -F "engagement_name=CI-${{ github.ref_name }}" \
+            -F "auto_create_context=true" \
+            -F "active=true" \
+            -F "verified=false" \
+            -F "commit_hash=${{ github.sha }}" \
+            -F "branch_tag=${{ github.ref_name }}" \
+            -F "close_old_findings=true"
+
+      - name: Guardar informe como artefacto
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dependency-check-report
+          path: reports
+# =========================================================================
+# STAGE 3: STAGING Y DAST (Solo escanea y sube el informe)
+# =========================================================================
+dast-zap:
     name: 3. Staging y DAST (OWASP ZAP)
     needs: [sast-semgrep, sca-dependency-check]
     runs-on: ubuntu-latest
