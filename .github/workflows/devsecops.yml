@@ -1,5 +1,44 @@
-sast-semgrep:
-    name: 1. SAST (semgrep)
+name: Pipeline DevSecOps - NodeGoat
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  # =========================================================================
+  # STAGE 0: BUILD (Instalación de dependencias y validación de imagen)
+  # =========================================================================
+  build:
+    name: 0. Build (NodeGoat)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout del código
+        uses: actions/checkout@v4
+
+      - name: Configurar Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '16'
+
+      - name: Instalar dependencias de NodeGoat
+        run: npm install --ignore-scripts
+
+      - name: Construir imagen Docker (si existe Dockerfile)
+        run: |
+          if [ -f Dockerfile ]; then
+            docker build -t nodegoat-app:ci .
+          else
+            echo "Build de dependencias Node.js completado."
+          fi
+
+  # =========================================================================
+  # STAGE 1A (PARALELO): SAST (Semgrep)
+  # =========================================================================
+  sast-semgrep:
+    name: 1a. SAST (Semgrep)
+    needs: [build]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout del código
@@ -18,64 +57,66 @@ sast-semgrep:
           name: sast-report
           path: semgrep.json
 
-      # modo aviso no frena el pipeline
-      - name: Quality Gate A (aviso)
-        continue-on-error: true
-        run: |
-          HIGH=$(jq '[.results[] | select(.extra.severity == "ERROR")] | length' semgrep.json)
-          echo "Hallazgos críticos/altos detectados por Semgrep: $HIGH"
-
-          if [ "$HIGH" -ge 1 ]; then
-            echo "::warning::QUALITY GATE A: se detectaron $HIGH hallazgos críticos/altos (modo aviso, el pipeline continúa)."
-            exit 1
-          fi
-
-sca-dependency-check:
-  name: 2. Análisis (SCA)
-  runs-on: ubuntu-latest
-
-  steps:
-      - name: Checkout
+  # =========================================================================
+  # STAGE 1B (PARALELO): SCA (OWASP Dependency-Check)
+  # =========================================================================
+  sca-dependency-check:
+    name: 1b. SCA (Dependency-Check)
+    needs: [build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout del código
         uses: actions/checkout@v4
 
-      - name: Dependency-Check
+      - name: Ejecutar OWASP Dependency-Check
         uses: dependency-check/Dependency-Check_Action@main
         with:
           project: ${{ github.event.repository.name }}
           path: '.'
-          format: 'ALL'          
+          format: 'XML'
           out: 'reports'
           args: >
             --nvdApiKey ${{ secrets.NVD_API_KEY }}
 
-      - name: Subir informe a DefectDojo
-        if: always()
-        run: |
-          curl --fail-with-body -X POST "${{ secrets.DOJO_URL }}/api/v2/import-scan/" \
-            -H "Authorization: Token ${{ secrets.DOJO_TOKEN }}" \
-            -F "scan_type=Dependency Check Scan" \
-            -F "file=@reports/dependency-check-report.xml" \
-            -F "product_name=${{ github.event.repository.name }}" \
-            -F "engagement_name=CI-${{ github.ref_name }}" \
-            -F "auto_create_context=true" \
-            -F "active=true" \
-            -F "verified=false" \
-            -F "commit_hash=${{ github.sha }}" \
-            -F "branch_tag=${{ github.ref_name }}" \
-            -F "close_old_findings=true"
-
-      - name: Guardar informe como artefacto
+      - name: Guardar artefacto dependency-check-report.xml
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: dependency-check-report
-          path: reports
-# =========================================================================
-# STAGE 3: STAGING Y DAST (Solo escanea y sube el informe)
-# =========================================================================
-dast-zap:
-    name: 3. Staging y DAST (OWASP ZAP)
+          path: reports/dependency-check-report.xml
+
+  # =========================================================================
+  # QUALITY GATE A: EVALUACIÓN ESTÁTICA EN MODO AVISO
+  # =========================================================================
+  quality-gate-a:
+    name: 2. Quality Gate A (Modo Aviso)
     needs: [sast-semgrep, sca-dependency-check]
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - name: Descargar informes estáticos (SAST y SCA)
+        uses: actions/download-artifact@v4
+        with:
+          path: static-reports
+
+      - name: Evaluar umbral en SAST y SCA (>= 1 crítica o alta)
+        run: |
+          HIGH_SAST=$(jq '[.results[] | select(.extra.severity == "ERROR")] | length' static-reports/sast-report/semgrep.json || echo 0)
+          HIGH_SCA=$(grep -c "<severity>HIGH</severity>\|<severity>CRITICAL</severity>" static-reports/dependency-check-report/dependency-check-report.xml || true)
+
+          echo "Hallazgos críticos/altos -> SAST: $HIGH_SAST \vert{} SCA:$HIGH_SCA"
+
+          if [ "$HIGH_SAST" -ge 1 ] \vert{}\vert{} [ "$HIGH_SCA" -ge 1 ]; then
+            echo "::warning::QUALITY GATE A (AVISO): Se detectaron vulnerabilidades críticas/altas (SAST: $HIGH_SAST, SCA:$HIGH_SCA). El pipeline continúa hacia DAST."
+            exit 1
+          fi
+
+  # =========================================================================
+  # STAGE 3: STAGING Y DAST (OWASP ZAP)
+  # =========================================================================
+  dast-zap:
+    name: 3. Staging y DAST (OWASP ZAP)
+    needs: [quality-gate-a]
     runs-on: ubuntu-latest
     services:
       mongo:
@@ -83,7 +124,8 @@ dast-zap:
         ports:
           - 27017:27017
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout del código
+        uses: actions/checkout@v4
 
       - name: Desplegar NodeGoat en Staging
         run: |
@@ -116,7 +158,8 @@ dast-zap:
     if: always()
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - name: Descargar todos los informes
+        uses: actions/download-artifact@v4
         with:
           path: all-reports
 
@@ -127,60 +170,15 @@ dast-zap:
           ENGAGEMENT_ID: ${{ secrets.DOJO_ENGAGEMENT_ID }}
         run: |
           for item in \
-            "semgrep-report/semgrep-report.json|Semgrep JSON Report" \
-            "sca-report/dependency-check-report.xml|Dependency Check Scan" \
+            "sast-report/semgrep.json|Semgrep JSON Report" \
+            "dependency-check-report/dependency-check-report.xml|Dependency Check Scan" \
             "dast-report/zap-report.xml|ZAP Scan"; do
             FILE="all-reports/${item%%|*}"
             TYPE="${item##*|}"
             if [ -f "$FILE" ]; then
-              curl -f -s -X POST "$DOJO_URL/api/v2/reimport-scan/" \
+              echo "Subiendo $FILE ($TYPE)..."
+              curl --fail-with-body -s -X POST "$DOJO_URL/api/v2/reimport-scan/" \
                 -H "Authorization: Token $DOJO_TOKEN" \
                 -F "scan_type=$TYPE" \
                 -F "engagement=$ENGAGEMENT_ID" \
-                -F "scan_date=$(date +%Y-%m-%d)" \
-                -F "active=true" \
-                -F "file=@$FILE"
-            fi
-          done
-
-  # =========================================================================
-  # QUALITY GATE B: CONSULTA GLOBAL EN DEFECTDOJO (Bloqueante)
-  # =========================================================================
-  quality-gate-b:
-    name: 5. Quality Gate B (DefectDojo)
-    needs: [import-defectdojo]
-    runs-on: ubuntu-latest
-    steps:
-      - name: Evaluar hallazgos Críticos/Altos activos en DefectDojo
-        env:
-          DOJO_URL: ${{ secrets.DOJO_URL }}
-          DOJO_TOKEN: ${{ secrets.DOJO_TOKEN }}
-          ENGAGEMENT_ID: ${{ secrets.DOJO_ENGAGEMENT_ID }}
-        run: |
-          # Espera breve para asegurar que DefectDojo termina de procesar y deduplicar
-          sleep 5
-
-          # Consulta a la API cuántos findings ACTIVOS y NO FALSOS POSITIVOS son Critical o High
-          RESPONSE=$(curl -f -s -H "Authorization: Token $DOJO_TOKEN" \
-            "$DOJO_URL/api/v2/findings/?test__engagement=$ENGAGEMENT_ID&active=true&false_p=false&severity__in=Critical,High&limit=1")
-
-          COUNT=$(echo "$RESPONSE" | jq '.count')
-          echo "Total de vulnerabilidades Críticas/Altas activas en DefectDojo (SAST + SCA + DAST): $COUNT"
-
-          if [ "$COUNT" -ge 1 ]; then
-            echo "::error::QUALITY GATE B BLOQUEADO: DefectDojo reporta $COUNT vulnerabilidades críticas o altas activas."
-            exit 1
-          fi
-
-  # =========================================================================
-  # STAGE 6: PRODUCCIÓN (Solo si DefectDojo aprueba el Gate B)
-  # =========================================================================
-  deploy-production:
-    name: 6. Despliegue a Producción
-    needs: [quality-gate-b]
-    if: success() && github.ref == 'refs/heads/main'
-    environment: production
-    runs-on: ubuntu-latest
-    steps:
-      - name: Desplegar versión aprobada en Producción
-        run: echo "Quality Gate B superado en DefectDojo. Desplegando en producción..."
+                -F "scan_date
