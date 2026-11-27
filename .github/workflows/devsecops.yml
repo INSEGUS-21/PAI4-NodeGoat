@@ -179,6 +179,7 @@ jobs:
               echo "Subiendo $FILE ($TYPE)..."
               curl --fail-with-body -s -X POST "$DOJO_URL/api/v2/reimport-scan/" \
                 -H "Authorization: Token $DOJO_TOKEN" \
+                -H "Sec-Fetch-Site: same-origin" \
                 -F "scan_type=$TYPE" \
                 -F "engagement=$ENGAGEMENT_ID" \
                 -F "scan_date=$(date +%Y-%m-%d)" \
