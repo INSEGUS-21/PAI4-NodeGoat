@@ -163,7 +163,7 @@ jobs:
         with:
           path: all-reports
 
-      - name: Subir informes a DefectDojo vía API (reimport-scan)
+      - name: Subir informes a DefectDojo vía API
         env:
           DOJO_URL: ${{ secrets.DOJO_URL }}
           DOJO_TOKEN: ${{ secrets.DOJO_TOKEN }}
@@ -176,8 +176,8 @@ jobs:
             FILE="all-reports/${item%%|*}"
             TYPE="${item##*|}"
             if [ -f "$FILE" ]; then
-              echo "Subiendo $FILE ($TYPE)..."
-              curl --fail-with-body -s -X POST "$DOJO_URL/api/v2/reimport-scan/" \
+              echo "=== Subiendo $FILE ($TYPE) al Engagement $ENGAGEMENT_ID ==="
+              curl -i -s -X POST "$DOJO_URL/api/v2/import-scan/" \
                 -H "Authorization: Token $DOJO_TOKEN" \
                 -H "Sec-Fetch-Site: same-origin" \
                 -F "scan_type=$TYPE" \
@@ -185,12 +185,13 @@ jobs:
                 -F "scan_date=$(date +%Y-%m-%d)" \
                 -F "active=true" \
                 -F "verified=false" \
+                -F "close_old_findings=true" \
                 -F "file=@$FILE"
+              echo ""
             else
               echo "::warning::No se encontró el fichero $FILE"
             fi
           done
-
   # =========================================================================
   # QUALITY GATE B: CONSULTA GLOBAL EN DEFECTDOJO (Bloqueante)
   # =========================================================================
