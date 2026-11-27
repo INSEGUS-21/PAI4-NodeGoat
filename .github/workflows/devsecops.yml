@@ -92,7 +92,6 @@ jobs:
     name: 2. Quality Gate A (Modo Aviso)
     needs: [sast-semgrep, sca-dependency-check]
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - name: Descargar informes estáticos (SAST y SCA)
         uses: actions/download-artifact@v4
@@ -100,6 +99,7 @@ jobs:
           path: static-reports
 
       - name: Evaluar umbral en SAST y SCA (>= 1 crítica o alta)
+        continue-on-error: true
         run: |
           HIGH_SAST=$(jq '[.results[] | select(.extra.severity == "ERROR")] | length' static-reports/sast-report/semgrep.json || echo 0)
           HIGH_SCA=$(grep -c "<severity>HIGH</severity>\|<severity>CRITICAL</severity>" static-reports/dependency-check-report/dependency-check-report.xml || true)
@@ -135,6 +135,7 @@ jobs:
           chmod 777 ${{ github.workspace }}
 
       - name: Ejecutar OWASP ZAP (DAST)
+        continue-on-error: true
         uses: zaproxy/action-full-scan@v0.10.0
         with:
           target: 'http://localhost:4000'
@@ -198,6 +199,7 @@ jobs:
   quality-gate-b:
     name: 5. Quality Gate B (DefectDojo)
     needs: [import-defectdojo]
+    if: always()
     runs-on: ubuntu-latest
     steps:
       - name: Evaluar hallazgos Críticos/Altos activos en DefectDojo
